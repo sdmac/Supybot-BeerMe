@@ -1,4 +1,4 @@
 Supybot-BeerMe
 ==============
 
-Water and tea ain't got nothin' on me
+Discuss brew with the facts at your fingertips.
