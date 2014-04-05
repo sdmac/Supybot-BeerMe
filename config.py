@@ -16,7 +16,14 @@ def configure(advanced):
 
 
 BeerMe = conf.registerPlugin('BeerMe')
-# This is where your configuration variables (if any) should go.  For example:
-# conf.registerGlobalValue(BeerMe, 'someConfigVariableName',
-#     registry.Boolean(False, """Help for someConfigVariableName."""))
+conf.registerGlobalValue(BeerMe, 'apiKey',
+    registry.String('a2cac2b9b32c8724e39964d6f84ba644',
+    """The BreweryDB API Key."""))
+conf.registerGroup(BeerMe, 'search')
+conf.registerGlobalValue(BeerMe.search, 'limit',
+    registry.PositiveInteger(5, """Maximum number of search results to
+    display."""))
+conf.registerGlobalValue(BeerMe.search, 'fields',
+    registry.CommaSeparatedListOfStrings(['name', 'style', 'brewery', 'abv'],
+    """Which fields to display for each search result hit."""))
 

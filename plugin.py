@@ -5,6 +5,7 @@
 
 import requests
 
+import supybot.conf as conf
 import supybot.utils as utils
 from supybot.commands import *
 import supybot.plugins as plugins
@@ -48,7 +49,6 @@ class BeerMe(callbacks.Plugin):
     Water and tea ain't got nothin' on me
     """
     baseUrl = 'http://api.brewerydb.com/v2'
-    apiKey = 'a2cac2b9b32c8724e39964d6f84ba644'
 
     fieldDispatch = {
             'name': (BeerMeHelper._getSimpleField,
@@ -86,10 +86,11 @@ class BeerMe(callbacks.Plugin):
             if field in self.fieldDispatch:
                 (dispatch, kwargs) = self.fieldDispatch[field]
                 out = dispatch(beer, **kwargs)
-                if 'bracketize' in kwargs and kwargs['bracketize'] is False:
-                    outFields.append(out)
-                else:
-                    outFields.append(u"[{0}]".format(out) if len(out) else "")
+                if out:
+                    if 'bracketize' in kwargs and kwargs['bracketize'] is False:
+                        outFields.append(out)
+                    else:
+                        outFields.append(u"[{0}]".format(out))
         return ' '.join(outFields)
 
     def random(self, irc, msg, args, text):
@@ -101,7 +102,7 @@ class BeerMe(callbacks.Plugin):
         e.g. 'random style,desc,abv'
         """
         self.log.debug('Fetching random beer..')
-        payload = {'key': self.apiKey}
+        payload = {'key': self.registryValue('apiKey')}
         fields = ['name']
         if text:
             fields.extend(text.split(','))
@@ -121,9 +122,9 @@ class BeerMe(callbacks.Plugin):
 
         Search for beers matching <query>.
         """
-        maxNum = 5
+        maxNum = self.registryValue('search.limit')
         self.log.debug('Searching beers for %s (%d hits)..' % (text, maxNum))
-        payload = {'key': self.apiKey,
+        payload = {'key': self.registryValue('apiKey'),
                    'type': 'beer',
                    'withBreweries': 'Y',
                    'q': text}
@@ -131,7 +132,7 @@ class BeerMe(callbacks.Plugin):
         self.log.debug('Search URL=[%s]' % r.url)
         jr = r.json()
         hits = []
-        fields = ['name', 'style', 'brewery', 'abv', 'glass']
+        fields = self.registryValue('search.fields')
         if 'data' in jr and jr['status'] == 'success':
             for idx, beer in enumerate(jr['data'], start=1):
                 if idx > maxNum:
