@@ -58,6 +58,9 @@ class BeerMe(callbacks.Plugin):
             'style': (BeerMeHelper._getSimpleField,
                 {'color': 'brown',
                     'path': ['style', 'name']}),
+            'category': (BeerMeHelper._getSimpleField,
+                {'color': 'brown',
+                    'path': ['style', 'category', 'name']}),
             'abv': (BeerMeHelper._getSimpleField,
                 {'color': 'dark grey',
                     'path': ['abv'],
@@ -66,6 +69,9 @@ class BeerMe(callbacks.Plugin):
                 {'color': 'purple',
                     'path': ['glass', 'name']}),
             'description': (BeerMeHelper._getSimpleField,
+                {'color': 'light grey',
+                    'path': ['description']}),
+            'desc': (BeerMeHelper._getSimpleField,
                 {'color': 'light grey',
                     'path': ['description']}),
             'brewery': (BeerMeHelper._getBrewery,
@@ -129,6 +135,29 @@ class BeerMe(callbacks.Plugin):
                         match = True
         return match
 
+    def _internal_search(self, text, maxNum, search_type):
+        self.log.debug('Searching beers for %s (%d hits)..' % (text, maxNum))
+        payload = {'key': self.registryValue('apiKey'),
+                   'type': 'beer',
+                   'withBreweries': 'Y',
+                   'q': text}
+        r = requests.get("%s/search" % self.baseUrl, params=payload)
+        self.log.debug('Search URL=[%s]' % r.url)
+        jr = r.json()
+        hits = []
+        reason = ''
+        if 'data' in jr and jr['status'] == 'success':
+            for beer in jr['data']:
+                if (len(hits) + 1) > maxNum:
+                    break
+                if self._match(text, beer, search_type):
+                    hits.append(beer)
+            if len(hits) == 0:
+                reason = 'Sorry bro, search results es no bueno'
+        else:
+            reason = 'You\'re searchin\' for sumthin\' that ain\'t there'
+        return (hits, reason)
+
     def search(self, irc, msg, args, text):
         """[beer | brewery] <query> [(<num_results>)]
 
@@ -137,6 +166,7 @@ class BeerMe(callbacks.Plugin):
         Optionally specify number of search results in parentheses.
         """
         maxNum = self.registryValue('search.limit')
+        fields = self.registryValue('search.fields')
         search_type = 'beer'
         terms = text.split()
         if terms[0] == 'beer' or terms[0] == 'beers':
@@ -156,29 +186,34 @@ class BeerMe(callbacks.Plugin):
                 except ValueError:
                     irc.reply('Only integers in parentheses next time!')
                 text = text.replace(term, '')
-        self.log.debug('Searching beers for %s (%d hits)..' % (text, maxNum))
-        payload = {'key': self.registryValue('apiKey'),
-                   'type': 'beer',
-                   'withBreweries': 'Y',
-                   'q': text}
-        r = requests.get("%s/search" % self.baseUrl, params=payload)
-        self.log.debug('Search URL=[%s]' % r.url)
-        jr = r.json()
-        hits = []
-        fields = self.registryValue('search.fields')
-        if 'data' in jr and jr['status'] == 'success':
-            for idx, beer in enumerate(jr['data'], start=1):
-                if idx > maxNum:
-                    break
-                if self._match(text, beer, search_type):
-                    hits.append(self._printFields(beer, fields))
-            if len(hits) > 0:
-                irc.replies(hits, prefixNick=False)
-            else:
-                irc.reply('Sorry bro, search results es no bueno')
+        (hits, no_hits_reason) = self._internal_search(text, maxNum, search_type)
+        if len(hits) > 0:
+            pretty_hits = [self._printFields(hit, fields) for hit in hits]
+            irc.replies(pretty_hits, prefixNick=False)
         else:
-            irc.reply('You\'re searchin\' for sumthin\' that ain\'t there')
+            irc.reply(no_hits_reason)
     search = wrap(search, ['text'])
+
+    def describe(self, irc, msg, args, text):
+        """<beer_name> [(<field>,...)]
+
+        Describe the beer in full.
+        Optionall specify the output fields where each <field> is one of: 
+        { brewery, style, category, abv, glass, description, desc }
+        and fields must be specified as a comma-separated list in parens 
+        e.g. 'Ruination IPA (style,abv,desc)'
+        """
+        (hits, no_hits_reason) = self._internal_search(text, 1, 'beer')
+        if len(hits) > 0:
+            fields = ['name', 'style', 'brewery', 'abv', 'glass', 'desc']
+            for term in text.split():
+                if term.startswith('(') and term.endswith(')'):
+                    fields = ['name'] + term[1:-1].split(',')
+            pretty_hits = [self._printFields(hit, fields) for hit in hits]
+            irc.replies(pretty_hits, prefixNick=False)
+        else:
+            irc.reply(no_hits_reason)
+    describe = wrap(describe, ['text'])
 
     def beerme(self, irc, msg, args):
         self.random(irc, msg, args)
