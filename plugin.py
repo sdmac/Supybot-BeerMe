@@ -61,7 +61,7 @@ class BeerMe(callbacks.Plugin):
             'abv': (BeerMeHelper._getSimpleField,
                 {'color': 'dark grey',
                     'path': ['abv'],
-                    'postfix': '%% ABV'}),
+                    'postfix': '% ABV'}),
             'glass': (BeerMeHelper._getSimpleField,
                 {'color': 'purple',
                     'path': ['glass', 'name']}),
@@ -123,6 +123,13 @@ class BeerMe(callbacks.Plugin):
         Search for beers matching <query>.
         """
         maxNum = self.registryValue('search.limit')
+        for term in text.split():
+            if term.startswith('(') and term.endswith(')'):
+                maxNum = int(term[1:-1])
+                if maxNum > 10:
+                    maxNum = 10
+                    irc.reply('Nice try. Hope you can live with 10, Epicurus.')
+                text = text.replace(term, '')
         self.log.debug('Searching beers for %s (%d hits)..' % (text, maxNum))
         payload = {'key': self.registryValue('apiKey'),
                    'type': 'beer',
