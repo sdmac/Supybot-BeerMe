@@ -117,18 +117,44 @@ class BeerMe(callbacks.Plugin):
             irc.reply('The random beers only start after the first seven')
     random = wrap(random, [optional('text')])
 
+    def _match(self, text, beer, search_type):
+        match = False
+        for term in text.split():
+            if search_type == 'beer':
+                if term.lower() in beer['name'].lower():
+                    match = True
+            elif search_type == 'brewery':
+                for brewery in beer['breweries']:
+                    if term.lower() in brewery['name'].lower():
+                        match = True
+        return match
+
     def search(self, irc, msg, args, text):
-        """<query>
+        """[beer | brewery] <query> [(<num_results>)]
 
         Search for beers matching <query>.
+        Optionally specify 'beer' or 'brewery' first as search type.
+        Optionally specify number of search results in parentheses.
         """
         maxNum = self.registryValue('search.limit')
-        for term in text.split():
+        search_type = 'beer'
+        terms = text.split()
+        if terms[0] == 'beer' or terms[0] == 'beers':
+            search_type = 'beer'
+            terms = terms[1:]
+        elif terms[0] == 'brewery' or terms[0] == 'breweries':
+            search_type = 'brewery'
+            terms = terms[1:]
+        for term in terms:
             if term.startswith('(') and term.endswith(')'):
-                maxNum = int(term[1:-1])
-                if maxNum > 10:
-                    maxNum = 10
-                    irc.reply('Nice try. Hope you can live with 10, Epicurus.')
+                try:
+                    maxNum = int(term[1:-1])
+                    if maxNum > 10:
+                        maxNum = 10
+                        irc.reply('Nice try. Hope you can live with 10,'
+                                  ' Epicurus.')
+                except ValueError:
+                    irc.reply('Only integers in parentheses next time!')
                 text = text.replace(term, '')
         self.log.debug('Searching beers for %s (%d hits)..' % (text, maxNum))
         payload = {'key': self.registryValue('apiKey'),
@@ -144,8 +170,12 @@ class BeerMe(callbacks.Plugin):
             for idx, beer in enumerate(jr['data'], start=1):
                 if idx > maxNum:
                     break
-                hits.append(self._printFields(beer, fields))
-            irc.replies(hits, prefixNick=False)
+                if self._match(text, beer, search_type):
+                    hits.append(self._printFields(beer, fields))
+            if len(hits) > 0:
+                irc.replies(hits, prefixNick=False)
+            else:
+                irc.reply('Sorry bro, search results es no bueno')
         else:
             irc.reply('You\'re searchin\' for sumthin\' that ain\'t there')
     search = wrap(search, ['text'])
