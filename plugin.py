@@ -3,14 +3,67 @@
 # All rights reserved.
 ###
 
+import time
 import requests
 
+import supybot.dbi as dbi
+import supybot.cdb as cdb
 import supybot.conf as conf
 import supybot.utils as utils
 from supybot.commands import *
 import supybot.plugins as plugins
 import supybot.ircutils as ircutils
 import supybot.callbacks as callbacks
+
+
+class DbiBeerDB(plugins.DbiChannelDB):
+    class DB(dbi.DB):
+        Mapping = 'cdb'
+        class Record(dbi.Record):
+            __fields__ = [
+                    'beer_id',
+                    'name',
+                    'brewery',
+                    'nick',
+                    'date_added',
+                    'reviews',
+                    'votes'
+                    ]
+
+        def __init__(self, filename):
+            self.db = cdb.open(filename, 'c')
+
+        def _new_record(self, serialized):
+            record = self.Record()
+            record.deserialize(serialized)
+            return record
+
+        def update(self, beer_id, name, brewery, date, nick, review):
+            if beer_id in self.db:
+                existing_record = self._new_record(self.db[beer_id])
+                existing_record.reviews.append(review)
+                self.db[beer_id] = existing_record.serialize()
+            else:
+                new_record = self.Record(beer_id=beer_id, name=name,
+                                         brewery=brewery, date_added=date,
+                                         nick=nick, reviews=[review],
+                                         votes=0)
+                self.db[beer_id] = new_record.serialize()
+
+        def get(self, beer_id):
+            return self._new_record(self.db[beer_id])
+
+        def get_all(self):
+            records = {}
+            for (beer_id, serialized_record) in self.db.iteritems():
+                records[beer_id] = self._new_record(serialized_record)
+            return records
+
+        def flush(self):
+            self.db.flush()
+
+        def close(self):
+            self.db.close()
 
 
 class BeerMeHelper:
@@ -82,6 +135,7 @@ class BeerMe(callbacks.Plugin):
     def __init__(self, irc):
         self.__parent = super(BeerMe, self)
         self.__parent.__init__(irc)
+        self.db = plugins.DB('BeerMe', {'cdb': DbiBeerDB})()
 
     def listCommands(self):
         return self.__parent.listCommands(["random", "search"])
@@ -214,6 +268,96 @@ class BeerMe(callbacks.Plugin):
         else:
             irc.reply(no_hits_reason)
     describe = wrap(describe, ['text'])
+
+    def _show_review(self, irc, channel, beer_id=None, beer_name=None):
+        try:
+            if not beer_id:
+                beer = self._internal_search(beer_name, 1, 'beer')
+                if len(beer) != 1:
+                    irc.reply('Cannot find this one')
+                    return
+                beer_id = beer['id']
+            entry = self.db.get(channel, beer_id)
+            out = [(u"{0} ({1})"
+                    .format(ircutils.mircColor(entry.name, 'orange'),
+                            ircutils.mircColor(entry.brewery, 'dark blue')))]
+            for review in entry.reviews:
+                r = (u" [{0}][{1}][{2:0.1f}][{3}]"
+                        .format(ircutils.mircColor(review['date'], 'dark grey'),
+                                ircutils.mircColor(review['nick'], 'blue'),
+                                ircutils.mircColor(review['rating'], 'green'),
+                                ircutils.mircColor(review['description'],
+                                                   'light grey')))
+                out.append(r)
+            irc.replies(out, prefixNick=False)
+        except KeyError:
+            irc.reply('Cannot find a review for \'%s\'' % beer_name)
+
+    def review(self, irc, msg, args, channel, text):
+        components = text.split(';')
+        if len(components) == 3:
+            date = time.strftime('%B %d, %Y %H:%M', time.localtime())
+            (beer_name, rating, desc) = tuple(components)
+            (beers, reason) = self._internal_search(beer_name, 1, 'beer')
+            if len(beers) == 1:
+                beer = beers[0]
+                review = {'rating': rating.strip(),
+                          'description': desc.strip(),
+                          'nick': msg.nick,
+                          'date': date}
+                brewery = ''
+                if 'breweries' in beer and 'name' in beer['breweries'][0]:
+                    brewery = beer['breweries'][0]['name']
+                self.db.update(channel,
+                               beer['id'], beer['name'], brewery,
+                               date, msg.nick, review)
+                self._show_review(irc, channel, beer_id=beer['id'])
+            else:
+                irc.reply('Cannot find this one: %s' % reason)
+        else:
+            irc.reply('Try again. And this time, think a little harder first.')
+    review = wrap(review, ['channel', 'text'])
+
+    def reviews(self, irc, msg, args, channel, text):
+        self._show_review(irc, channel, text)
+    reviews = wrap(reviews, ['channel', 'text'])
+
+    def top(self, irc, msg, args, channel):
+        rating_calculated = []
+        all_beers = self.db.get_all(channel)
+        for (beer_id, record) in all_beers.iteritems():
+            rating_sum = float(0)
+            for review in record.reviews:
+                rating_sum = rating_sum + float(review['rating'])
+            num_reviews = len(record.reviews)
+            rating_avg = rating_sum / num_reviews
+            rating_calculated.append((rating_avg, num_reviews, record))
+        output = []
+        ranked_by_rating = sorted(rating_calculated, reverse=True)[0:10]
+        l = [(len(r.name) + len(r.brewery)) for (_, _, r) in ranked_by_rating]
+        self.log.debug("Sorted length list: %s" % (sorted(l, reverse=True)))
+        max_len = sorted(l, reverse=True)[0] + 11
+        self.log.debug("Max length: %s" % max_len)
+        for i, (avg, num, record) in enumerate(ranked_by_rating, start=1):
+            beer_brewery = (u"{0} ({1})"
+                            .format(ircutils.mircColor(record.name, 'orange'),
+                                    ircutils.mircColor(record.brewery,
+                                                       'dark blue')))
+            self.log.debug("Max length: {beer:{beer_width}}|".format(beer=beer_brewery,
+                                                                     beer_width=max_len))
+            output.append((u" [{rank}] {beer:{beer_width}} [{avg_str} {avg} "
+                            "({num_reviews} review{rev_plural})]"
+                            .format(rank=ircutils.mircColor(i, 'blue'),
+                                    beer=beer_brewery, beer_width=int(max_len),
+                                    avg_str=ircutils.mircColor('Avg.',
+                                                               'dark grey'),
+                                    avg=ircutils.mircColor('{0:0.1f}'.format(avg),
+                                                           'green'),
+                                    num_reviews=ircutils.mircColor(num,
+                                                                   'light grey'),
+                                    rev_plural=('s' if num > 1 else ''))))
+        irc.replies(output, prefixNick=False)
+    top = wrap(top, ['channel'])
 
     def beerme(self, irc, msg, args):
         self.random(irc, msg, args)
