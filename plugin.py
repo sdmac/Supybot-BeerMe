@@ -15,6 +15,12 @@ import supybot.plugins as plugins
 import supybot.ircutils as ircutils
 import supybot.callbacks as callbacks
 
+# TODO(seanmac): also track beers as they are searched for
+
+
+def color(s, fg=None, bg=None):
+    return ircutils.mircColor(s, fg, bg)
+
 
 class DbiBeerDB(plugins.DbiChannelDB):
     class DB(dbi.DB):
@@ -26,8 +32,8 @@ class DbiBeerDB(plugins.DbiChannelDB):
                     'brewery',
                     'nick',
                     'date_added',
+                    'votes',
                     'reviews',
-                    'votes'
                     ]
 
         def __init__(self, filename):
@@ -74,9 +80,9 @@ class BeerMeHelper:
         breweries = []
         for i in range(min(num, len(beer['breweries']))):
             brewery = beer['breweries'][i]
-            name = ircutils.mircColor(brewery['name'], color)
+            name = color(brewery['name'], color)
             if 'established' in brewery:
-                est = ircutils.mircColor(brewery['established'], color)
+                est = color(brewery['established'], color)
                 breweries.append(u"{0}, est. {1}".format(name, est))
             else:
                 breweries.append(u"{0}".format(name))
@@ -94,7 +100,7 @@ class BeerMeHelper:
             cur = kwargs['prefix'] + cur
         if 'postfix' in kwargs:
             cur = cur + kwargs['postfix']
-        return u"{0}".format(ircutils.mircColor(cur, color))
+        return u"{0}".format(color(cur, color))
 
 
 class BeerMe(callbacks.Plugin):
@@ -272,22 +278,23 @@ class BeerMe(callbacks.Plugin):
     def _show_review(self, irc, channel, beer_id=None, beer_name=None):
         try:
             if not beer_id:
-                beer = self._internal_search(beer_name, 1, 'beer')
+                (beer, reason) = self._internal_search(beer_name, 1, 'beer')
                 if len(beer) != 1:
-                    irc.reply('Cannot find this one')
+                    irc.reply('Cannot find this one: %s' % reason)
                     return
-                beer_id = beer['id']
+                beer_id = beer[0]['id']
             entry = self.db.get(channel, beer_id)
             out = [(u"{0} ({1})"
-                    .format(ircutils.mircColor(entry.name, 'orange'),
-                            ircutils.mircColor(entry.brewery, 'dark blue')))]
+                    .format(color(entry.name, 'orange'),
+                            color(entry.brewery, 'dark blue')))]
             for review in entry.reviews:
-                r = (u" [{0}][{1}][{2:0.1f}][{3}]"
-                        .format(ircutils.mircColor(review['date'], 'dark grey'),
-                                ircutils.mircColor(review['nick'], 'blue'),
-                                ircutils.mircColor(review['rating'], 'green'),
-                                ircutils.mircColor(review['description'],
-                                                   'light grey')))
+                r = (u" [{0}][{1}][{2}][{3}]"
+                        .format(color(review['date'], 'dark grey'),
+                                color(review['nick'], 'blue'),
+                                color(('{0:0.1f}'
+                                       .format(float(review['rating']))),
+                                      'green'),
+                                color(review['description'], 'light grey')))
                 out.append(r)
             irc.replies(out, prefixNick=False)
         except KeyError:
@@ -319,7 +326,7 @@ class BeerMe(callbacks.Plugin):
     review = wrap(review, ['channel', 'text'])
 
     def reviews(self, irc, msg, args, channel, text):
-        self._show_review(irc, channel, text)
+        self._show_review(irc, channel, beer_name=text)
     reviews = wrap(reviews, ['channel', 'text'])
 
     def top(self, irc, msg, args, channel):
@@ -335,26 +342,18 @@ class BeerMe(callbacks.Plugin):
         output = []
         ranked_by_rating = sorted(rating_calculated, reverse=True)[0:10]
         l = [(len(r.name) + len(r.brewery)) for (_, _, r) in ranked_by_rating]
-        self.log.debug("Sorted length list: %s" % (sorted(l, reverse=True)))
         max_len = sorted(l, reverse=True)[0] + 11
-        self.log.debug("Max length: %s" % max_len)
         for i, (avg, num, record) in enumerate(ranked_by_rating, start=1):
             beer_brewery = (u"{0} ({1})"
-                            .format(ircutils.mircColor(record.name, 'orange'),
-                                    ircutils.mircColor(record.brewery,
-                                                       'dark blue')))
-            self.log.debug("Max length: {beer:{beer_width}}|".format(beer=beer_brewery,
-                                                                     beer_width=max_len))
+                            .format(color(record.name, 'orange'),
+                                    color(record.brewery, 'dark blue')))
             output.append((u" [{rank}] {beer:{beer_width}} [{avg_str} {avg} "
                             "({num_reviews} review{rev_plural})]"
-                            .format(rank=ircutils.mircColor(i, 'blue'),
+                            .format(rank=color(i, 'blue'),
                                     beer=beer_brewery, beer_width=int(max_len),
-                                    avg_str=ircutils.mircColor('Avg.',
-                                                               'dark grey'),
-                                    avg=ircutils.mircColor('{0:0.1f}'.format(avg),
-                                                           'green'),
-                                    num_reviews=ircutils.mircColor(num,
-                                                                   'light grey'),
+                                    avg_str=color('Avg.', 'dark grey'),
+                                    avg=color('{0:0.1f}'.format(avg), 'green'),
+                                    num_reviews=color(num, 'light grey'),
                                     rev_plural=('s' if num > 1 else ''))))
         irc.replies(output, prefixNick=False)
     top = wrap(top, ['channel'])
