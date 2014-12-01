@@ -56,6 +56,14 @@ class DbiBeerDB(plugins.DbiChannelDB):
                                          votes=0)
                 self.db[beer_id] = new_record.serialize()
 
+        def update_votes(self, beer_id, votes):
+            if beer_id in self.db:
+                existing_record = self._new_record(self.db[beer_id])
+                existing_record.votes = votes
+                self.db[beer_id] = existing_record.serialize()
+            else:
+                raise KeyError, beer_id
+
         def get(self, beer_id):
             return self._new_record(self.db[beer_id])
 
@@ -278,15 +286,23 @@ class BeerMe(callbacks.Plugin):
     def _show_review(self, irc, channel, beer_id=None, beer_name=None):
         try:
             if not beer_id:
-                (beer, reason) = self._internal_search(beer_name, 1, 'beer')
-                if len(beer) != 1:
+                (beers, reason) = self._internal_search(beer_name, 1, 'beer')
+                if len(beers) != 1:
                     irc.reply('Cannot find this one: %s' % reason)
                     return
-                beer_id = beer[0]['id']
+                beer_id = beers[0]['id']
             entry = self.db.get(channel, beer_id)
-            out = [(u"{0} ({1})"
+            rating_sum = float(0)
+            for review in entry.reviews:
+                rating_sum = rating_sum + float(review['rating'])
+            num_reviews = len(entry.reviews)
+            rating_avg = rating_sum / num_reviews
+            out = [(u"{0} ({1}) [Avg. {2}] [{3} vote{4}]"
                     .format(color(entry.name, 'orange'),
-                            color(entry.brewery, 'dark blue')))]
+                            color(entry.brewery, 'dark blue'),
+                            color(rating_avg, 'green'),
+                            color(entry.votes, 'dark grey'),
+                            's' if int(entry.votes) != 1 else ''))]
             for review in entry.reviews:
                 r = (u" [{0}][{1}][{2}][{3}]"
                         .format(color(review['date'], 'dark grey'),
@@ -348,15 +364,42 @@ class BeerMe(callbacks.Plugin):
                             .format(color(record.name, 'orange'),
                                     color(record.brewery, 'dark blue')))
             output.append((u" [{rank}] {beer:{beer_width}} [{avg_str} {avg} "
-                            "({num_reviews} review{rev_plural})]"
+                            "({num_reviews} review{rev_plural})] "
+                            "[{num_votes} vote{vote_plural}]"
                             .format(rank=color(i, 'blue'),
                                     beer=beer_brewery, beer_width=int(max_len),
                                     avg_str=color('Avg.', 'dark grey'),
                                     avg=color('{0:0.1f}'.format(avg), 'green'),
                                     num_reviews=color(num, 'light grey'),
-                                    rev_plural=('s' if num > 1 else ''))))
+                                    rev_plural=('s' if num > 1 else ' '),
+                                    num_votes=color(record.votes, 'dark grey'),
+                                    vote_plural=('s' if int(record.votes) != 1
+                                                     else ''))))
         irc.replies(output, prefixNick=False)
     top = wrap(top, ['channel'])
+
+    def _vote(self, irc, msg, args, channel, text, up_vote=True):
+        try:
+            (beers, reason) = self._internal_search(text, 1, 'beer')
+            if len(beers) == 1:
+                beer_id = beers[0]['id']
+                entry = self.db.get(channel, beer_id)
+                num_votes = ((entry.votes + 1) if up_vote
+                             else ((entry.votes - 1) if entry.votes > 0 else 0))
+                self.db.update_votes(channel, beer_id, num_votes)
+                self._show_review(irc, channel, beer_id=beer_id)
+            else:
+                irc.reply('Cannot find this one: %s' % reason)
+        except KeyError:
+            irc.reply('There must be at least one review before voting')
+
+    def upvote(self, irc, msg, args, channel, text):
+        self._vote(irc, msg, args, channel, text, True)
+    upvote = wrap(upvote, ['channel', 'text'])
+
+    def downvote(self, irc, msg, args, channel, text):
+        self._vote(irc, msg, args, channel, text, False)
+    downvote = wrap(downvote, ['channel', 'text'])
 
     def beerme(self, irc, msg, args):
         self.random(irc, msg, args)
