@@ -13,16 +13,11 @@ import supybot.utils as utils
 from supybot.commands import *
 import supybot.plugins as plugins
 import supybot.ircutils as ircutils
+from supybot.ircutils import mircColor as mircColor
 import supybot.callbacks as callbacks
 
-# TODO(seanmac): also track beers as they are searched for
 
-
-def color(s, fg=None, bg=None):
-    return ircutils.mircColor(s, fg, bg)
-
-
-class DbiBeerDB(plugins.DbiChannelDB):
+class BeerReviewDB(plugins.DbiChannelDB):
     class DB(dbi.DB):
         Mapping = 'cdb'
         class Record(dbi.Record):
@@ -37,7 +32,7 @@ class DbiBeerDB(plugins.DbiChannelDB):
                     ]
 
         def __init__(self, filename):
-            self.db = cdb.open(filename, 'c')
+            self.db = cdb.open(filename + '.reviews', 'c')
 
         def _new_record(self, serialized):
             record = self.Record()
@@ -79,6 +74,50 @@ class DbiBeerDB(plugins.DbiChannelDB):
         def close(self):
             self.db.close()
 
+class BeerTrackerDB(plugins.DbiChannelDB):
+    class DB(dbi.DB):
+        Mapping = 'cdb'
+        class Record(dbi.Record):
+            __fields__ = [
+                    'beer_id',
+                    'name',
+                    'brewery',
+                    'refs',
+                    ]
+
+        def __init__(self, filename):
+            self.db = cdb.open(filename + '.tracker', 'c')
+
+        def _new_record(self, serialized):
+            record = self.Record()
+            record.deserialize(serialized)
+            return record
+
+        def update(self, beer_id, name, brewery, nick, date):
+            if beer_id in self.db:
+                existing_record = self._new_record(self.db[beer_id])
+                existing_record.refs.append((nick, date))
+                self.db[beer_id] = existing_record.serialize()
+            else:
+                new_record = self.Record(beer_id=beer_id, name=name,
+                                         brewery=brewery, refs=[(nick, date)])
+                self.db[beer_id] = new_record.serialize()
+
+        def get(self, beer_id):
+            return self._new_record(self.db[beer_id])
+
+        def get_all(self):
+            records = {}
+            for (beer_id, serialized_record) in self.db.iteritems():
+                records[beer_id] = self._new_record(serialized_record)
+            return records
+
+        def flush(self):
+            self.db.flush()
+
+        def close(self):
+            self.db.close()
+
 
 class BeerMeHelper:
     @classmethod
@@ -88,9 +127,9 @@ class BeerMeHelper:
         breweries = []
         for i in range(min(num, len(beer['breweries']))):
             brewery = beer['breweries'][i]
-            name = color(brewery['name'], color)
+            name = mircColor(brewery['name'], color)
             if 'established' in brewery:
-                est = color(brewery['established'], color)
+                est = mircColor(brewery['established'], color)
                 breweries.append(u"{0}, est. {1}".format(name, est))
             else:
                 breweries.append(u"{0}".format(name))
@@ -108,7 +147,7 @@ class BeerMeHelper:
             cur = kwargs['prefix'] + cur
         if 'postfix' in kwargs:
             cur = cur + kwargs['postfix']
-        return u"{0}".format(color(cur, color))
+        return u"{0}".format(mircColor(cur, color))
 
 
 class BeerMe(callbacks.Plugin):
@@ -149,10 +188,19 @@ class BeerMe(callbacks.Plugin):
     def __init__(self, irc):
         self.__parent = super(BeerMe, self)
         self.__parent.__init__(irc)
-        self.db = plugins.DB('BeerMe', {'cdb': DbiBeerDB})()
+        self.review_db = plugins.DB('BeerMe', {'cdb': BeerReviewDB})()
+        self.tracker_db = plugins.DB('BeerMe', {'cdb': BeerTrackerDB})()
 
     def listCommands(self):
-        return self.__parent.listCommands(["random", "search"])
+        return self.__parent.listCommands(["random",
+                                           "search",
+                                           "describe",
+                                           "review",
+                                           "reviews",
+                                           "top",
+                                           "upvote",
+                                           "downvote",
+                                           "tracker"])
 
     def _printFields(self, beer, fields):
         outFields = []
@@ -191,6 +239,18 @@ class BeerMe(callbacks.Plugin):
             irc.reply('The random beers only start after the first seven')
     random = wrap(random, [optional('text')])
 
+    def _track(self, channel, beer, nick):
+        self.tracker_db.update(channel,
+                               beer['id'],
+                               beer['name'],
+                               (beer['breweries'][0]['name']
+                                   if ('breweries' in beer
+                                           and 'name' in beer['breweries'][0])
+                                   else ''),
+                               nick,
+                               time.strftime('%B %d, %Y %H:%M',
+                                             time.localtime()))
+
     def _match(self, text, beer, search_type):
         match = False
         for term in text.split():
@@ -226,7 +286,7 @@ class BeerMe(callbacks.Plugin):
             reason = 'You\'re searchin\' for sumthin\' that ain\'t there'
         return (hits, reason)
 
-    def search(self, irc, msg, args, text):
+    def search(self, irc, msg, args, channel, text):
         """[beer | brewery] <query> [(<num_results>)]
 
         Search for beers matching <query>.
@@ -257,16 +317,17 @@ class BeerMe(callbacks.Plugin):
         (hits, no_hits_reason) = self._internal_search(text, maxNum, search_type)
         if len(hits) > 0:
             pretty_hits = [self._printFields(hit, fields) for hit in hits]
+            self._track(channel, hits[0], msg.nick)
             irc.replies(pretty_hits, prefixNick=False)
         else:
             irc.reply(no_hits_reason)
-    search = wrap(search, ['text'])
+    search = wrap(search, ['channel', 'text'])
 
-    def describe(self, irc, msg, args, text):
+    def describe(self, irc, msg, args, channel, text):
         """<beer_name> [(<field>,...)]
 
         Describe the beer in full.
-        Optionall specify the output fields where each <field> is one of: 
+        Optionally specify the output fields where each <field> is one of: 
         { brewery, style, category, abv, glass, description, desc }
         and fields must be specified as a comma-separated list in parens 
         e.g. 'Ruination IPA (style,abv,desc)'
@@ -278,10 +339,34 @@ class BeerMe(callbacks.Plugin):
                 if term.startswith('(') and term.endswith(')'):
                     fields = ['name'] + term[1:-1].split(',')
             pretty_hits = [self._printFields(hit, fields) for hit in hits]
+            self._track(channel, hits[0], msg.nick)
             irc.replies(pretty_hits, prefixNick=False)
         else:
             irc.reply(no_hits_reason)
-    describe = wrap(describe, ['text'])
+    describe = wrap(describe, ['channel', 'text'])
+
+    def tracker(self, irc, msg, args, channel):
+        output = []
+        freq_calculated = []
+        records = self.tracker_db.get_all(channel)
+        for (_, r) in records.iteritems():
+            freq = len(r.refs)
+            mentioners = set([ref[0] for ref in r.refs])
+            freq_calculated.append((freq, mentioners, r))
+        ranked_by_freq = sorted(freq_calculated, reverse=True)[0:10]
+        for i, (freq, ments, r) in enumerate(ranked_by_freq, start=1):
+            nicks = ', '.join([mircColor(m, 'blue') for m in ments])
+            output.append((u" [{rank}] {name} ({brewery}) [{ms} {freq}] "
+                            "[{mrs} {nicks}]"
+                            .format(rank=mircColor(i, 'blue'),
+                                    name=mircColor(r.name, 'orange'),
+                                    brewery=mircColor(r.brewery, 'dark blue'),
+                                    freq=mircColor(freq, 'green'),
+                                    ms=mircColor('Mentions:', 'dark grey'),
+                                    mrs=mircColor('Mentioners:', 'dark grey'),
+                                    nicks=nicks)))
+        irc.replies(output, prefixNick=False)
+    tracker = wrap(tracker, ['channel'])
 
     def _show_review(self, irc, channel, beer_id=None, beer_name=None):
         try:
@@ -291,26 +376,26 @@ class BeerMe(callbacks.Plugin):
                     irc.reply('Cannot find this one: %s' % reason)
                     return
                 beer_id = beers[0]['id']
-            entry = self.db.get(channel, beer_id)
+            entry = self.review_db.get(channel, beer_id)
             rating_sum = float(0)
             for review in entry.reviews:
                 rating_sum = rating_sum + float(review['rating'])
             num_reviews = len(entry.reviews)
             rating_avg = rating_sum / num_reviews
             out = [(u"{0} ({1}) [Avg. {2}] [{3} vote{4}]"
-                    .format(color(entry.name, 'orange'),
-                            color(entry.brewery, 'dark blue'),
-                            color(rating_avg, 'green'),
-                            color(entry.votes, 'dark grey'),
+                    .format(mircColor(entry.name, 'orange'),
+                            mircColor(entry.brewery, 'dark blue'),
+                            mircColor(rating_avg, 'green'),
+                            mircColor(entry.votes, 'dark grey'),
                             's' if int(entry.votes) != 1 else ''))]
             for review in entry.reviews:
                 r = (u" [{0}][{1}][{2}][{3}]"
-                        .format(color(review['date'], 'dark grey'),
-                                color(review['nick'], 'blue'),
-                                color(('{0:0.1f}'
-                                       .format(float(review['rating']))),
-                                      'green'),
-                                color(review['description'], 'light grey')))
+                        .format(mircColor(review['date'], 'dark grey'),
+                                mircColor(review['nick'], 'blue'),
+                                mircColor(('{0:0.1f}'
+                                           .format(float(review['rating']))),
+                                           'green'),
+                                mircColor(review['description'], 'light grey')))
                 out.append(r)
             irc.replies(out, prefixNick=False)
         except KeyError:
@@ -331,9 +416,9 @@ class BeerMe(callbacks.Plugin):
                 brewery = ''
                 if 'breweries' in beer and 'name' in beer['breweries'][0]:
                     brewery = beer['breweries'][0]['name']
-                self.db.update(channel,
-                               beer['id'], beer['name'], brewery,
-                               date, msg.nick, review)
+                self.review_db.update(channel,
+                                      beer['id'], beer['name'], brewery,
+                                      date, msg.nick, review)
                 self._show_review(irc, channel, beer_id=beer['id'])
             else:
                 irc.reply('Cannot find this one: %s' % reason)
@@ -347,7 +432,10 @@ class BeerMe(callbacks.Plugin):
 
     def top(self, irc, msg, args, channel):
         rating_calculated = []
-        all_beers = self.db.get_all(channel)
+        all_beers = self.review_db.get_all(channel)
+        if len(all_beers) == 0:
+            irc.reply('No reviewed beers!')
+            return
         for (beer_id, record) in all_beers.iteritems():
             rating_sum = float(0)
             for review in record.reviews:
@@ -361,18 +449,20 @@ class BeerMe(callbacks.Plugin):
         max_len = sorted(l, reverse=True)[0] + 11
         for i, (avg, num, record) in enumerate(ranked_by_rating, start=1):
             beer_brewery = (u"{0} ({1})"
-                            .format(color(record.name, 'orange'),
-                                    color(record.brewery, 'dark blue')))
+                            .format(mircColor(record.name, 'orange'),
+                                    mircColor(record.brewery, 'dark blue')))
             output.append((u" [{rank}] {beer:{beer_width}} [{avg_str} {avg} "
                             "({num_reviews} review{rev_plural})] "
                             "[{num_votes} vote{vote_plural}]"
-                            .format(rank=color(i, 'blue'),
+                            .format(rank=mircColor(i, 'blue'),
                                     beer=beer_brewery, beer_width=int(max_len),
-                                    avg_str=color('Avg.', 'dark grey'),
-                                    avg=color('{0:0.1f}'.format(avg), 'green'),
-                                    num_reviews=color(num, 'light grey'),
+                                    avg_str=mircColor('Avg.', 'dark grey'),
+                                    avg=mircColor('{0:0.1f}'.format(avg),
+                                                  'green'),
+                                    num_reviews=mircColor(num, 'light grey'),
                                     rev_plural=('s' if num > 1 else ' '),
-                                    num_votes=color(record.votes, 'dark grey'),
+                                    num_votes=mircColor(record.votes,
+                                                        'dark grey'),
                                     vote_plural=('s' if int(record.votes) != 1
                                                      else ''))))
         irc.replies(output, prefixNick=False)
@@ -383,10 +473,10 @@ class BeerMe(callbacks.Plugin):
             (beers, reason) = self._internal_search(text, 1, 'beer')
             if len(beers) == 1:
                 beer_id = beers[0]['id']
-                entry = self.db.get(channel, beer_id)
+                entry = self.review_db.get(channel, beer_id)
                 num_votes = ((entry.votes + 1) if up_vote
                              else ((entry.votes - 1) if entry.votes > 0 else 0))
-                self.db.update_votes(channel, beer_id, num_votes)
+                self.review_db.update_votes(channel, beer_id, num_votes)
                 self._show_review(irc, channel, beer_id=beer_id)
             else:
                 irc.reply('Cannot find this one: %s' % reason)
